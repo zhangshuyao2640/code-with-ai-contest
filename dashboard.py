@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
-import pydeck as pdk
-import plotly.express as px
+import folium
+from streamlit_folium import st_folium
 import plotly.graph_objects as go
 
 # ── 页面配置 ──────────────────────────────────────────────
@@ -11,7 +11,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# ── 全局样式注入 ───────────────────────────────────────────
+# ── 全局样式 ───────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Noto+Sans+SC:wght@300;400;700&display=swap');
@@ -21,8 +21,6 @@ html, body, [class*="css"] {
     background-color: #0a0e1a;
     color: #e0e8ff;
 }
-
-/* 大标题区 */
 .hero {
     background: linear-gradient(135deg, #0d1b2a 0%, #112240 60%, #0a192f 100%);
     border: 1px solid #1e3a5f;
@@ -35,10 +33,8 @@ html, body, [class*="css"] {
 .hero::before {
     content: '';
     position: absolute;
-    top: -40%;
-    right: -10%;
-    width: 400px;
-    height: 400px;
+    top: -40%; right: -10%;
+    width: 400px; height: 400px;
     background: radial-gradient(circle, rgba(0,200,255,0.08) 0%, transparent 70%);
     pointer-events: none;
 }
@@ -57,8 +53,6 @@ html, body, [class*="css"] {
     margin: 0;
     font-weight: 300;
 }
-
-/* KPI 卡片 */
 .kpi-row {
     display: flex;
     gap: 16px;
@@ -85,8 +79,6 @@ html, body, [class*="css"] {
     letter-spacing: 1px;
     text-transform: uppercase;
 }
-
-/* 区块标题 */
 .section-title {
     font-family: 'Space Mono', monospace;
     font-size: 1rem;
@@ -97,8 +89,6 @@ html, body, [class*="css"] {
     padding-bottom: 8px;
     border-bottom: 1px solid #1e3a5f;
 }
-
-/* 图例 */
 .legend {
     display: flex;
     gap: 20px;
@@ -124,26 +114,25 @@ html, body, [class*="css"] {
 @st.cache_data
 def load_data():
     df = pd.read_csv("signal_samples.csv")
-    # 信号强度分级
+
     def classify(rsrp):
         if rsrp > -90:
-            return "优秀 (> -90)"
+            return "优秀"
         elif rsrp >= -110:
-            return "中等 (-110 ~ -90)"
+            return "中等"
         else:
-            return "较差 (< -110)"
+            return "较差"
 
-    def color(rsrp):
+    def color_hex(rsrp):
         if rsrp > -90:
-            return [34, 197, 94, 210]       # 绿
+            return "#22c55e"
         elif rsrp >= -110:
-            return [250, 204, 21, 210]      # 黄
+            return "#facc15"
         else:
-            return [239, 68, 68, 210]       # 红
+            return "#ef4444"
 
     df["signal_level"] = df["RSRP_dBm"].apply(classify)
-    df["color"] = df["RSRP_dBm"].apply(color)
-    df["radius"] = 60
+    df["color_hex"]    = df["RSRP_dBm"].apply(color_hex)
     return df
 
 df = load_data()
@@ -156,10 +145,10 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ── KPI 指标行 ─────────────────────────────────────────────
-total = len(df)
-good  = (df["RSRP_dBm"] > -90).sum()
-bad   = (df["RSRP_dBm"] < -110).sum()
+# ── KPI 卡片 ───────────────────────────────────────────────
+total  = len(df)
+good   = (df["RSRP_dBm"] > -90).sum()
+bad    = (df["RSRP_dBm"] < -110).sum()
 avg_dl = df["Download_Mbps"].mean()
 
 st.markdown(f"""
@@ -183,7 +172,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ── 地图 ───────────────────────────────────────────────────
+# ── 真实地图（Folium + OpenStreetMap） ─────────────────────
 st.markdown('<p class="section-title">▍地理分布 · 信号强度热图</p>', unsafe_allow_html=True)
 
 st.markdown("""
@@ -194,59 +183,52 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-layer = pdk.Layer(
-    "ScatterplotLayer",
-    data=df,
-    get_position=["Longitude", "Latitude"],
-    get_fill_color="color",
-    get_radius="radius",
-    pickable=True,
-    auto_highlight=True,
-    highlight_color=[255, 255, 255, 80],
+center_lat = df["Latitude"].mean()
+center_lon = df["Longitude"].mean()
+
+m = folium.Map(
+    location=[center_lat, center_lon],
+    zoom_start=13,
+    tiles="OpenStreetMap",
 )
 
-view = pdk.ViewState(
-    latitude=df["Latitude"].mean(),
-    longitude=df["Longitude"].mean(),
-    zoom=12,
-    pitch=35,
-)
+for _, row in df.iterrows():
+    popup_html = f"""
+    <div style="font-family:monospace;font-size:12px;min-width:180px">
+      <b>基站 {row['CellID']}</b><br/>
+      📶 频段：{row['Band']}<br/>
+      📡 RSRP：<b>{row['RSRP_dBm']} dBm</b><br/>
+      🔊 SINR：{row['SINR_dB']} dB<br/>
+      📱 终端：{row['TerminalType']}<br/>
+      ⬇️ 下载：{row['Download_Mbps']} Mbps<br/>
+      📶 信号：{row['signal_level']}
+    </div>
+    """
+    folium.CircleMarker(
+        location=[row["Latitude"], row["Longitude"]],
+        radius=6,
+        color=row["color_hex"],
+        fill=True,
+        fill_color=row["color_hex"],
+        fill_opacity=0.85,
+        weight=1.5,
+        popup=folium.Popup(popup_html, max_width=220),
+        tooltip=f"基站 {row['CellID']} | {row['RSRP_dBm']} dBm | {row['signal_level']}",
+    ).add_to(m)
 
-tooltip = {
-    "html": """
-    <div style="background:#0f1e35;border:1px solid #1e3a5f;border-radius:8px;padding:12px;font-family:monospace;font-size:12px;color:#e0e8ff">
-      <b style="color:#00d4ff">基站 {CellID}</b><br/>
-      📶 频段：{Band}<br/>
-      📍 位置：{Latitude:.4f}, {Longitude:.4f}<br/>
-      📡 RSRP：<b>{RSRP_dBm} dBm</b><br/>
-      🔊 SINR：{SINR_dB} dB<br/>
-      📱 终端：{TerminalType}<br/>
-      ⬇️ 下载：{Download_Mbps} Mbps
-    </div>""",
-    "style": {"background": "transparent", "border": "none"},
-}
-
-deck = pdk.Deck(
-    layers=[layer],
-    initial_view_state=view,
-    tooltip=tooltip,
-    map_style="mapbox://styles/mapbox/dark-v10",
-)
-
-st.pydeck_chart(deck, use_container_width=True)
+st_folium(m, use_container_width=True, height=500)
 
 st.divider()
 
-# ── 图表区（两列） ──────────────────────────────────────────
+# ── 图表区 ─────────────────────────────────────────────────
 col1, col2 = st.columns(2)
 
-PLOT_BG   = "#0a0e1a"
-PAPER_BG  = "#0f1e35"
-GRID_CLR  = "#1e3a5f"
-TEXT_CLR  = "#e0e8ff"
-TICK_CLR  = "#7a9cc0"
+PLOT_BG  = "#0a0e1a"
+PAPER_BG = "#0f1e35"
+GRID_CLR = "#1e3a5f"
+TEXT_CLR = "#e0e8ff"
+TICK_CLR = "#7a9cc0"
 
-# 柱状图：各频段基站数量
 with col1:
     st.markdown('<p class="section-title">▍各频段基站数量</p>', unsafe_allow_html=True)
     band_counts = df.groupby("Band")["CellID"].nunique().reset_index()
@@ -270,20 +252,19 @@ with col1:
         paper_bgcolor=PAPER_BG,
         font=dict(color=TEXT_CLR, family="Noto Sans SC"),
         xaxis=dict(title="", gridcolor=GRID_CLR, tickfont=dict(color=TICK_CLR, size=13)),
-        yaxis=dict(title="基站数量（唯一CellID）", gridcolor=GRID_CLR, tickfont=dict(color=TICK_CLR)),
+        yaxis=dict(title="基站数量（唯一 CellID）", gridcolor=GRID_CLR, tickfont=dict(color=TICK_CLR)),
         margin=dict(t=20, b=20, l=10, r=10),
         height=340,
         bargap=0.35,
     )
     st.plotly_chart(fig_bar, use_container_width=True)
 
-# 饼图：终端类型占比
 with col2:
     st.markdown('<p class="section-title">▍终端类型占比</p>', unsafe_allow_html=True)
     term_counts = df["TerminalType"].value_counts().reset_index()
     term_counts.columns = ["TerminalType", "数量"]
 
-    PIE_COLORS = ["#00d4ff", "#22c55e", "#f97316", "#a855f7"]
+    PIE_COLORS = ["#00d4ff", "#22c55e", "#f97316"]
     fig_pie = go.Figure(go.Pie(
         labels=term_counts["TerminalType"],
         values=term_counts["数量"],
@@ -296,10 +277,7 @@ with col2:
         plot_bgcolor=PLOT_BG,
         paper_bgcolor=PAPER_BG,
         font=dict(color=TEXT_CLR, family="Noto Sans SC"),
-        legend=dict(
-            font=dict(color=TEXT_CLR, size=12),
-            bgcolor="rgba(0,0,0,0)",
-        ),
+        legend=dict(font=dict(color=TEXT_CLR, size=12), bgcolor="rgba(0,0,0,0)"),
         margin=dict(t=20, b=20, l=10, r=10),
         height=340,
         annotations=[dict(
@@ -312,9 +290,8 @@ with col2:
     )
     st.plotly_chart(fig_pie, use_container_width=True)
 
-# ── 底部说明 ───────────────────────────────────────────────
 st.markdown("""
 <div style="text-align:center;color:#2d4a6a;font-size:0.75rem;margin-top:24px;font-family:monospace;">
-  5G NR · 频段 n28 / n41 / n78 · 数据来源: signal_samples.csv · 共 500 条采样
+  5G NR · 频段 n28 / n41 / n78 · 数据来源: signal_samples.csv · 共 500 条采样 · 地图 © OpenStreetMap
 </div>
 """, unsafe_allow_html=True)
